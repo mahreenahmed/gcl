@@ -61,6 +61,9 @@ if "reg_model" not in st.session_state:
 if "feature_scaler" not in st.session_state:
     st.session_state.feature_scaler = None
 
+if "user_prompt_default" not in st.session_state:
+    st.session_state.user_prompt_default = ""
+
 # ------------------------- STYLES -------------------------
 st.markdown("""
 <style>
@@ -918,7 +921,7 @@ if run_batch and st.session_state.results:
         ])
         low_imgs = [r['file'] for r in st.session_state.results if r['class_prediction']=="Low"]
         low_context = f"⚠️ Low efficiency detected in: {', '.join(low_imgs)}\n\n" if low_imgs else ""
-        final_prompt = low_context + user_prompt_default.strip() + "\n\nBatch results:\n" + context_text + "\n\n" + (extra_prompt or "")
+        final_prompt = low_context + st.session_state.user_prompt_default.strip() + "\n\nBatch results:\n" + context_text + "\n\n" + (extra_prompt or "")
         llm_raw = generate_llm_response(sys_prompt, final_prompt, max_tokens, temp)
         cleaned_response = llm_raw.replace(final_prompt,"").strip()
         st.session_state.chat_history.append({"role":"user","text":"Batch summary request"})
@@ -946,7 +949,7 @@ if run_batch and st.session_state.results:
         # Build comprehensive context from ALL analysis results
         rich_context = build_llm_context(st.session_state.results)
         
-        final_prompt = f"{rich_context}\n\nQuestion: {user_prompt_default}"
+        final_prompt = f"{rich_context}\n\nQuestion: {st.session_state.user_prompt_default}"
         
         llm_raw = generate_llm_response(sys_prompt, final_prompt, max_tokens, temp)
         # Don't clean the response as aggressively for batch summaries
