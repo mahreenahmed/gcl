@@ -921,7 +921,7 @@ if run_batch and st.session_state.results:
         ])
         low_imgs = [r['file'] for r in st.session_state.results if r['class_prediction']=="Low"]
         low_context = f"⚠️ Low efficiency detected in: {', '.join(low_imgs)}\n\n" if low_imgs else ""
-        final_prompt = low_context + st.session_state.user_prompt_default.strip() + "\n\nBatch results:\n" + context_text + "\n\n" + (extra_prompt or "")
+        final_prompt = low_context + st.session_state.user_prompt_default.strip() + "\n\nBatch results:\n" + context_text + "\n\n" 
         llm_raw = generate_llm_response(sys_prompt, final_prompt, max_tokens, temp)
         cleaned_response = llm_raw.replace(final_prompt,"").strip()
         st.session_state.chat_history.append({"role":"user","text":"Batch summary request"})
