@@ -33,9 +33,9 @@ A powerful Streamlit application for analyzing solar cell Electroluminescence (E
 
 2. **Create virtual environment (recommended)**
 ```python -m venv el_env
-```source el_env/bin/activate
-```On Windows: 
-```el_env\Scripts\activate
+source el_env/bin/activate
+On Windows: 
+el_env\Scripts\activate
 
 3. **Install dependencies**
 ```pip install -r requirements.txt
