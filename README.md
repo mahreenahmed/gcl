@@ -41,12 +41,11 @@ A powerful Streamlit application for analyzing solar cell Electroluminescence (E
    pip install -r requirements.txt
 
 4. **Download model files**
-Place the following files in the models/ directory:
-- best_classifier.onnx
-- weighted_random_forest_model.pkl
-- feature_scaler.pkl
+   - Place the following files in the `models/` directory:
+     - `best_classifier.onnx`
+     - `weighted_random_forest_model.pkl`
+     - `feature_scaler.pkl`
 
 5. **Running the Application**
-**streamlit run el_agent_app.py
-**The app will open in your browser at http://localhost:8501
-
+   ```bash
+   streamlit run el_agent_app.py
