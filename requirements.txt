@@ -13,4 +13,4 @@ accelerate==1.11.0
 onnx==1.19.1
 onnxruntime==1.23.2
 opencv-python-headless==4.8.1.78
-
+cryptography==46.0.3 
