@@ -1,7 +1,7 @@
-🔍 EL Image Efficiency Agent
+# EL Image Efficiency Agent
 A powerful Streamlit application for analyzing solar cell Electroluminescence (EL) images using machine learning and large language models. Classify efficiency levels, predict Power Conversion Efficiency (PCE), and get AI-powered insights about your solar cell quality.
 
-✨ Features
+# Features
 • 🖼️ EL Image Analysis: Upload multiple solar cell EL images for batch processing
 • 📊 Efficiency Classification: Automatically classify images as High/Low efficiency using ResNet features
 • 🔬 PCE Prediction: Predict Power Conversion Efficiency for high-efficiency cells
@@ -10,13 +10,13 @@ A powerful Streamlit application for analyzing solar cell Electroluminescence (E
 • 📈 Batch Reporting: Generate comprehensive batch quality assessments
 • 📥 Data Export: Download results as CSV for further analysis
 
-🚀 Quick Start
+# Quick Start
 Prerequisites
 • Python 3.12
 • 4GB+ RAM
 • 2GB+ free disk space
 
-Installation
+# Installation
 1. Clone the repository
 git clone https://github.com/yourusername/el-agent-app.git
 cd el-agent-app
@@ -24,7 +24,9 @@ cd el-agent-app
 2. Create virtual environment (recommended)
 python -m venv el_env
 source el_env/bin/activate
-# On Windows: el_env\Scripts\activate
+
+On Windows: 
+el_env\Scripts\activate
 
 3. Install dependencies
 pip install -r requirements.txt
@@ -40,7 +42,7 @@ streamlit run el_agent_app.py
 
 The app will open in your browser at http://localhost:8501
 
-🎯 Usage Guide
+# Usage Guide
 Step 1: Upload EL Images
 • Click "Upload EL images" button
 • Select multiple PNG/JPG/JPEG files
@@ -65,7 +67,7 @@ Step 4: Ask Custom Questions
 ◦ "Compare high vs low efficiency cells"
 ◦ "What could cause the dark areas in image3.jpg?"
 
-📊 Understanding Results
+# Understanding Results
 Efficiency Classification
 • 🔆 High Efficiency: Uniform, bright luminescence (good quality)
 • ⚠️ Low Efficiency: Dark areas, cracks, non-uniform patterns (defects)
@@ -74,17 +76,17 @@ PCE Values
 • <10%: Poor performance
 • "—": Not calculated for low-efficiency cells
 
-Quality Indicators
+# Quality Indicators
 • High batch efficiency ratio: Good manufacturing consistency
 • Tight PCE distribution: Excellent process control
 • Low defect rate: Robust cell quality
 
-🔒 Security & Privacy
+# Security & Privacy
 • Encrypted API Keys: SJTU API keys are encrypted for security
 • No Data Storage: Uploaded images are processed in memory only
 • Session-based: Chat history clears when browser closes
 
-🐛 Troubleshooting
+# Troubleshooting
 Common Issues
 "Models not loaded" error
 • Ensure model files are in models/ directory
@@ -107,7 +109,7 @@ Performance Tips
 • Image size: Resize large images (>5MB) before uploading
 • Local mode: Use for faster results without advanced analysis
 
-🛠️ Development
+# Development
 Project Structure:
 el-agent-app/
 ├── el_agent_app.py          # Main application           
@@ -119,7 +121,7 @@ el-agent-app/
 ├── predictor.py            # ONNX classifier wrapper
 └── README.md
 
-📝 Citation
+# Citation
 If you use this tool in your research, please cite:
 bibtex
 @software{el_agent_2025,
