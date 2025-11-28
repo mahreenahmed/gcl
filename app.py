@@ -10,6 +10,8 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 import cv2
+import requests
+import time
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torchvision.models as models
 import torch.nn as nn
@@ -21,6 +23,10 @@ DEEPSEEK_MODEL_ID = "microsoft/DialoGPT-small"  # Much smaller model for deploym
 CLASSIFIER_PATH = "models/best_classifier.onnx"
 RF_MODEL_PATH = "models/weighted_random_forest_model.pkl"
 SCALER_PATH = "models/feature_scaler.pkl"
+
+# API Configuration
+API_URL = " https://models.sjtu.edu.cn/api/v1/chat/completions"
+API_MODEL = "deepseek-v3"  # Choose code model
 
 IMAGE_DISPLAY_WIDTH = 360
 AUTO_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -64,6 +70,10 @@ if "feature_scaler" not in st.session_state:
 if "user_prompt_default" not in st.session_state:
     st.session_state.user_prompt_default = ""
 
+# API Key in session state
+if "api_key" not in st.session_state:
+    st.session_state.api_key = ""
+
 # ------------------------- STYLES -------------------------
 st.markdown("""
 <style>
@@ -87,48 +97,51 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ------------------------- MODEL LOADERS -------------------------
-@st.cache_resource(show_spinner=True)
-def load_deepseek_model():
-    """Load the smallest possible model for deployment"""
-    model_options = [
-        # Try these in order - smallest first
-        {"name": "TinyGPT2", "id": "sshleifer/tiny-gpt2", "size": "50M"},
-        {"name": "DialoGPT-small", "id": "microsoft/DialoGPT-small", "size": "117M"},
-        {"name": "DistilGPT2", "id": "distilgpt2", "size": "82M"},
-    ]
+# ------------------------- API QUERY FUNCTION -------------------------
+def query_api(messages, max_tokens=150, temperature=0.3):
+    """Query the online API for LLM responses"""
+    if not st.session_state.api_key:
+        return "⚠️ Error: API key not configured. Please enter your API key in the sidebar."
     
-    for model_info in model_options:
-        try:
-            with st.spinner(f"🔄 Loading {model_info['name']} ({model_info['size']})..."):
-                tokenizer = AutoTokenizer.from_pretrained(
-                    model_info["id"],
-                    use_fast=True,
-                    trust_remote_code=True
-                )
-                
-                # Add padding token if missing
-                if tokenizer.pad_token is None:
-                    tokenizer.pad_token = tokenizer.eos_token
-                
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_info["id"],
-                    torch_dtype=torch.float32,
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True
-                )
-                
-                model.to("cpu")
-                st.success(f"✅ {model_info['name']} loaded successfully ({model_info['size']})")
-                return tokenizer, model, torch.device("cpu"), None
-                
-        except Exception as e:
-            st.warning(f"⚠️ Failed to load {model_info['name']}: {str(e)[:100]}...")
-            continue
+    url = API_URL
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {st.session_state.api_key}"
+    }
     
-    st.error("❌ All model loading attempts failed")
-    return None, None, torch.device("cpu"), None
+    data = {
+        "messages": [{"role": "user", "content": messages}],
+        "stream": False,
+        "do_sample": temperature > 0,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "model": API_MODEL,
+    }
+    
+    try:
+        with st.spinner("🔄 Querying API..."):
+            response = requests.post(url, headers=headers, json=data, timeout=60)
+            
+        if response.status_code == 200:
+            result = response.json()
+            content = result['choices'][0]['message']['content'].strip()
+            st.success(f"✅ API response received ({len(content)} characters)")
+            return content
+        else:
+            st.error(f"❌ API request failed with status code: {response.status_code}")
+            return f"⚠️ API Error: HTTP {response.status_code}"
+            
+    except requests.exceptions.Timeout:
+        st.error("❌ API request timed out")
+        return "⚠️ API Error: Request timeout"
+    except requests.exceptions.RequestException as e:
+        st.error(f"❌ API connection error: {e}")
+        return f"⚠️ API Error: {str(e)}"
+    except Exception as e:
+        st.error(f"❌ Unexpected API error: {e}")
+        return f"⚠️ API Error: {str(e)}"
 
+# ------------------------- MODEL LOADERS -------------------------
 @st.cache_resource(show_spinner=True)
 def load_regression_components(rf_path=RF_MODEL_PATH, scaler_path=SCALER_PATH):
     try:
@@ -198,23 +211,7 @@ def extract_resnet_features_old(pil_image, resnet_model, device="cpu"):
     # Flatten to 1D NumPy array
     return feats.cpu().numpy().squeeze().astype(np.float32)
 
-
 # ------------------------- FEATURE / CLASSIFY WRAPPERS -------------------------
-# def extract_resnet_features(pil_image, resnet_model):
-#     """
-#     Drop-in replacement that replicates the old ResNet pipeline:
-#     - Grayscale → 3-channel RGB
-#     - Resize (224,224)
-#     - No normalization
-#     - Output: 512-dim feature vector
-#     """
-#     img_np = np.array(pil_image.convert("L"))
-#     img_rgb = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
-#     img_tensor = old_resnet_transform(img_rgb).unsqueeze(0).to("cpu")  # CPU for Streamlit
-#     with torch.no_grad():
-#         feats = resnet_model(img_tensor)
-#     return feats.cpu().numpy().squeeze().astype(np.float32)
-
 def classify_with_wrapper(classifier, pil_image, resnet_model):
     if classifier is None or resnet_model is None:
         return None
@@ -293,82 +290,19 @@ def predict_pce_high_only(pil_img, cls_label, reg_model, scaler):
         st.error(f"❌ Regression error: {e}")
         return "—"
 
-def llm_generate_local(tokenizer, model, device, system_prompt, user_prompt, max_new_tokens=150, temperature=0.3):
-    """Optimized generation with support for DeepSeek chat format"""
+def generate_llm_response(system_prompt, user_prompt, max_new_tokens, temperature):
+    """Generate LLM response using API instead of local model"""
     try:
-        st.info("🔄 Starting LLM generation...")
+        # Combine system and user prompts for API
+        full_prompt = f"{system_prompt}\n\n{user_prompt}"
         
-        # Check if it's a DeepSeek model and use appropriate prompt format
-        model_name = str(type(model)).lower()
-        if "deepseek" in model_name:
-            # DeepSeek chat format
-            full_prompt = f"<s>System: {system_prompt}\n\nUser: {user_prompt}\n\nAssistant:"
-        else:
-            # Default format for other models
-            full_prompt = f"{system_prompt}\n\nQuestion: {user_prompt}\nAnswer:"
+        # Use API for generation
+        response = query_api(full_prompt, max_tokens=max_new_tokens, temperature=temperature)
         
-        inputs = tokenizer(
-            full_prompt, 
-            return_tensors="pt", 
-            truncation=True, 
-            max_length=2048,  # Increased for larger models
-            padding=True
-        )
-        
-        # Move inputs to the same device as model
-        inputs = {k: v.to(model.device) for k, v in inputs.items()}
-        
-        # Generation with model-specific parameters
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=temperature > 0,
-                top_p=0.9,
-                pad_token_id=tokenizer.eos_token_id,
-                repetition_penalty=1.1,
-                no_repeat_ngram_size=3
-            )
-        
-        # Decode only the new tokens
-        input_length = inputs["input_ids"].shape[1]
-        generated_tokens = outputs[0][input_length:]
-        text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-        
-        st.success(f"✅ Generated {len(text)} characters")
-        return text.strip()
+        return response
         
     except Exception as e:
-        st.error(f"❌ Generation error: {e}")
-        import traceback
-        st.error(f"Full traceback: {traceback.format_exc()}")
-        return f"⚠️ LLM Error: {str(e)}"
-        
-def adapt_prompt_for_model(system_prompt, user_prompt, model_name="unknown"):
-    """
-    Adapt prompts based on specific model capabilities
-    """
-    if "deepseek" in model_name.lower():
-        # DeepSeek can handle complex prompts
-        return system_prompt, user_prompt
-        
-    elif "gpt2" in model_name.lower():
-        # GPT2 needs very simple prompts
-        simplified_system = "You analyze solar cell EL images. High efficiency = good. Low efficiency = defects. Be very direct."
-        simple_user = user_prompt
-        if len(user_prompt.split()) > 15:
-            simple_user = "Summarize the solar cell analysis results clearly."
-        return simplified_system, simple_user
-        
-    elif "opt" in model_name.lower():
-        # OPT can handle moderate complexity
-        simplified_system = "You are a solar cell EL analysis expert. Use classification results and PCE values."
-        return simplified_system, user_prompt
-        
-    else:
-        # Default
-        return system_prompt, user_prompt
+        return f"⚠️ LLM generation error: {str(e)}"
 
 def build_context_aware_prompt(results_data, user_question):
     """Build prompts with dynamic context based on the question type"""
@@ -412,7 +346,7 @@ GENERAL ANALYSIS:
     
     return f"{base_context}\n\n{guidance}\n\nQuestion: {user_question}"
 
-def clean_llm_response(response, model_name):
+def clean_llm_response(response):
     """Clean and fix common model response issues with strict filtering"""
     if not response or len(response.strip()) < 5:
         return "No meaningful response generated."
@@ -450,6 +384,7 @@ def clean_llm_response(response, model_name):
         return "Response lacks relevant solar cell analysis content. Please try a more specific question."
     
     return response
+
 def build_llm_context(results_data):
     """Build rich context from classifier and regression results for the LLM"""
     if not results_data:
@@ -505,198 +440,27 @@ def build_llm_context(results_data):
     
     return "\n".join(context_parts)
 
-def generate_llm_response(system_prompt, user_prompt, max_new_tokens, temperature):
-    try:
-        if (hasattr(st.session_state, 'llm_model') and 
-            st.session_state.llm_model is not None):
-            
-            # Detect model type for prompt adaptation
-            model_type = str(type(st.session_state.llm_model)).lower()
-            if "deepseek" in model_type:
-                model_name = "deepseek"
-                max_new_tokens = min(max_new_tokens, 500)
-                temperature = min(temperature, 0.7)
-            elif "gpt2" in model_type:
-                model_name = "gpt2"
-                max_new_tokens = min(max_new_tokens, 80)
-                temperature = min(temperature, 0.4)
-            elif "opt" in model_type:
-                model_name = "opt"
-                max_new_tokens = min(max_new_tokens, 120)
-                temperature = min(temperature, 0.5)
-            else:
-                model_name = "unknown"
-            
-            # Adapt prompts for the specific model
-            adapted_system, adapted_user = adapt_prompt_for_model(
-                system_prompt, user_prompt, model_name
-            )
-            
-            response = llm_generate_local(
-                st.session_state.tokenizer, 
-                st.session_state.llm_model, 
-                st.session_state.llm_device, 
-                adapted_system,
-                adapted_user,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature
-            )
-            
-            # Post-process response - ONLY 2 ARGUMENTS NOW
-            cleaned_response = clean_llm_response(response, model_name)
-            return cleaned_response
-            
-        else:
-            return "⚠️ No LLM loaded. Please select and load a model in the sidebar."
-            
-    except Exception as e:
-        return f"⚠️ LLM generation error: {str(e)}"
-        
-def test_model_loading(model_id, model_name):
-    """Test if a specific model can be loaded successfully"""
-    try:
-        with st.spinner(f"🔄 Testing {model_name}..."):
-            # Test tokenizer loading
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_id,
-                use_fast=True,
-                trust_remote_code=True
-            )
-            
-            # Test model loading
-            model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                torch_dtype=torch.float32,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True
-            )
-            
-            # Test basic generation
-            test_input = "Say 'Hello World' in 3 words:"
-            inputs = tokenizer(test_input, return_tensors="pt", truncation=True, max_length=50)
-            
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=10,
-                    temperature=0.1,
-                    do_sample=True,
-                    pad_token_id=tokenizer.eos_token_id
-                )
-            
-            # Decode response
-            response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            return True, f"✅ {model_name} loaded successfully", response
-            
-    except Exception as e:
-        return False, f"❌ {model_name} failed: {str(e)[:100]}", None
-
 # ------------------------- MODEL INITIALIZATION (SIDEBAR) -------------------------
 with st.sidebar:
-    st.title("⚙️ Models & LLM")
+    st.title("⚙️ API Configuration")
     
-    # Model testing section
-    st.markdown("### 🧪 Model Testing")
-    
-    models_to_test = [
-        {"id": "deepseek-ai/deepseek-llm-7b-chat", "name": "DeepSeek-7B-Chat", "size": "7B"},
-        {"id": "deepseek-ai/deepseek-coder-1.3b-base", "name": "DeepSeek-Coder-1.3B", "size": "1.3B"},
-        {"id": "facebook/opt-125m", "name": "OPT-125M", "size": "125M"},
-        {"id": "gpt2", "name": "GPT2", "size": "124M"},
-    ]
-    
-    test_results = []
-    
-    for model_info in models_to_test:
-        if st.button(f"Test {model_info['name']}", key=f"test_{model_info['id'].replace('/', '_')}"):  # ✅ UNIQUE KEY
-            success, message, response = test_model_loading(model_info["id"], model_info["name"])
-            test_results.append({
-                "model": model_info["name"],
-                "success": success,
-                "message": message,
-                "response": response,
-                "size": model_info["size"]
-            })
-    
-    # Display test results
-    if test_results:
-        st.markdown("### 📊 Test Results")
-        for result in test_results:
-            if result["success"]:
-                st.success(f"{result['model']} ({result['size']}): {result['message']}")
-                st.text(f"Test response: {result['response']}")
-            else:
-                st.error(f"{result['model']}: {result['message']}")
-    
-    # Production model loading
-    st.markdown("---")
-    st.markdown("### 🚀 Production Model")
-    
-    # Add memory warning
-    st.info("💡 **Memory Notes**:\n- DeepSeek-7B: ~14GB RAM required\n- DeepSeek-1.3B: ~3GB RAM required\n- OPT/GPT2: ~500MB RAM required")
-    
-    selected_model = st.selectbox(
-        "Choose model for production:",
-        options=[m["id"] for m in models_to_test],
-        format_func=lambda x: next((m["name"] for m in models_to_test if m["id"] == x), x),
-        key="model_selector"
+    # API Key input
+    st.markdown("### 🔑 API Configuration")
+    api_key = st.text_input(
+        "Enter your API Key:",
+        type="password",
+        placeholder="Bearer your_api_key_here",
+        help="Get your API key from the model provider"
     )
     
-    if st.button("Load Selected Model", key="load_model_btn"):
-        with st.spinner(f"Loading {selected_model}..."):
-            try:
-                # Clear any previously loaded model from memory
-                if hasattr(st.session_state, 'llm_model') and st.session_state.llm_model is not None:
-                    del st.session_state.llm_model
-                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-                
-                st.session_state.tokenizer = AutoTokenizer.from_pretrained(
-                    selected_model,
-                    use_fast=True,
-                    trust_remote_code=True
-                )
-                
-                # Add padding token if missing
-                if st.session_state.tokenizer.pad_token is None:
-                    st.session_state.tokenizer.pad_token = st.session_state.tokenizer.eos_token
-                
-                # Load model with optimized settings for larger models
-                st.session_state.llm_model = AutoModelForCausalLM.from_pretrained(
-                    selected_model,
-                    torch_dtype=torch.float16,  # Use half precision to save memory
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                    device_map="auto" if torch.cuda.is_available() else None,
-                )
-                
-                # If no GPU, move to CPU explicitly
-                if not torch.cuda.is_available():
-                    st.session_state.llm_model = st.session_state.llm_model.to("cpu")
-                
-                st.session_state.llm_device = st.session_state.llm_model.device
-                st.success(f"✅ {selected_model} loaded for production!")
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"❌ Failed to load {selected_model}: {e}")
-                # If DeepSeek fails, try with even lower precision
-                if "deepseek" in selected_model.lower():
-                    st.info("🔄 Trying with lower precision...")
-                    try:
-                        st.session_state.llm_model = AutoModelForCausalLM.from_pretrained(
-                            selected_model,
-                            torch_dtype=torch.float32,
-                            trust_remote_code=True,
-                            low_cpu_mem_usage=True,
-                            device_map="cpu",
-                        )
-                        st.session_state.llm_model = st.session_state.llm_model.to("cpu")
-                        st.session_state.llm_device = torch.device("cpu")
-                        st.success(f"✅ {selected_model} loaded on CPU with float32!")
-                        st.rerun()
-                    except Exception as e2:
-                        st.error(f"❌ DeepSeek loading failed even with CPU: {e2}")
+    if api_key:
+        st.session_state.api_key = api_key
+        st.success("✅ API key configured")
+    else:
+        st.warning("⚠️ Please enter your API key to use LLM features")
+    
+    st.markdown("---")
+    st.markdown("### 📊 Model Status")
     
     # Load other models and store in session state
     with st.spinner("Loading analysis models..."):
@@ -709,11 +473,8 @@ with st.sidebar:
         if st.session_state.classifier is None:
             st.session_state.classifier = load_pce_classifier(CLASSIFIER_PATH)
 
-    # Model status dashboard (using session state)
-    st.markdown("### 📊 Model Status")
-    
     model_status = {
-        "LLM": "✅ Loaded" if st.session_state.llm_model is not None else "❌ Not loaded",
+        "API Connection": "✅ Configured" if st.session_state.api_key else "❌ Not configured",
         "Classifier": "✅ Loaded" if st.session_state.classifier is not None else "❌ Failed", 
         "ResNet": "✅ Loaded" if st.session_state.resnet_model is not None else "❌ Failed",
         "Regression": "✅ Loaded" if st.session_state.reg_model is not None else "❌ Failed"
@@ -754,51 +515,30 @@ with st.sidebar:
     
     CRITICAL: Always base your analysis on the provided EL image analysis results.""", 
         height=180, key="sys_prompt_area")
-    # Quick test with loaded model - test context understanding
-    if st.session_state.llm_model is not None:
-        if st.button("🧪 Test Current LLM", key="test_current_model"):
-            # Create a test context similar to real analysis
-            test_context = """EL IMAGE ANALYSIS RESULTS:
-            - Total images analyzed: 5
-            - High efficiency solar cells: 3 (60.0%)
-            - Low efficiency solar cells: 2 (40.0%)
-            - PCE range (high efficiency): 12.50% to 18.20%
-            - Average PCE (high efficiency): 15.23%
-            - PCE QUALITY: 3/3 high efficiency cells ≥10%
-            - Low efficiency images: image3.jpg, image5.jpg
-            - BATCH QUALITY: Mixed batch with significant variation
-            
-            DETAILED RESULTS:
-            1. image1.jpg: High efficiency, PCE: 12.50%
-            2. image2.jpg: High efficiency, PCE: 14.80%
-            3. image3.jpg: Low efficiency, PCE: N/A
-            4. image4.jpg: High efficiency, PCE: 18.20%
-            5. image5.jpg: Low efficiency, PCE: N/A"""
-            with st.spinner("Testing context understanding..."):
-                test_response = generate_llm_response(
-                    sys_prompt,
-                    f"{test_context}\n\nQuestion: How many high efficiency solar cells were found?",
-                    max_new_tokens=30,
-                    temperature=0.1
-                )
-            st.info(f"Test Response: '{test_response}'")
-            
-            # Check if LLM understood the context
-            if "3" in test_response or "three" in test_response.lower():
-                st.success("✅ LLM understands analysis context!")
+    
+    # Test API connection
+    if st.session_state.api_key:
+        if st.button("🧪 Test API Connection", key="test_api_connection"):
+            with st.spinner("Testing API connection..."):
+                test_response = query_api("Say 'Hello World' in 3 words:", max_tokens=10, temperature=0.1)
+            if "Hello" in test_response or "hello" in test_response.lower():
+                st.success("✅ API connection successful!")
+                st.info(f"Test response: '{test_response}'")
             else:
-                st.warning("⚠️ LLM may not be using the provided context properly")
+                st.error("❌ API connection test failed")
+                st.info(f"Response: '{test_response}'")
+
 # ------------------------- UI -------------------------
 st.title("🔍 EL Image Efficiency Agent")
 uploaded_files = st.file_uploader("📤 Upload EL images", accept_multiple_files=True, type=["png","jpg","jpeg"])
 
 # ✅ ADD THIS WARNING MESSAGE:
-if not hasattr(st.session_state, 'llm_model') or st.session_state.llm_model is None:
+if not st.session_state.api_key:
     st.warning("""
-    ⚠️ **LLM Note**: No language model is currently loaded. 
+    ⚠️ **LLM Note**: No API key configured. 
     - Image classification and analysis will still work
     - LLM features (summaries, Q&A) are disabled
-    - Please select and load a model in the sidebar
+    - Please enter your API key in the sidebar
     """)
     
 col_run, col_clear, col_dl = st.columns([1,1,2])
@@ -836,10 +576,10 @@ if uploaded_files:
             pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
             # ---------------- Old ResNet Feature Extraction ----------------
-            feats_cls = extract_resnet_features_old(pil_img, st.session_state.resnet_model, device="cpu").reshape(1, -1)  # ✅ FIXED
+            feats_cls = extract_resnet_features_old(pil_img, st.session_state.resnet_model, device="cpu").reshape(1, -1)
 
             # ---------------- Classification ----------------
-            cls_raw = st.session_state.classifier.predict_from_features(feats_cls)  # ✅ FIXED
+            cls_raw = st.session_state.classifier.predict_from_features(feats_cls)
             parsed = parse_classifier_result(cls_raw)
 
             # ---------------- Regression (PCE) ----------------
@@ -877,8 +617,6 @@ if uploaded_files:
                 st.markdown(
                     f"<div class='prediction-card {cls_style}'>"
                     f"<div class='pred-header'>{icon} {rec['class_prediction']}</div>"
-                    # f"<div class='pred-sub'>Confidence</div>"
-                    # f"<div class='pred-percent'>{rec['class_confidence']*100:.1f}%</div>"
                     f"</div>", unsafe_allow_html=True
                 )
 
@@ -891,65 +629,39 @@ if uploaded_files:
                 q = st.text_input(f"Question for {uploaded.name}", key=f"q_{uploaded.name}_{idx}", 
                                   value="What could cause this efficiency level?")
                 if st.button("💬 Ask LLM", key=f"ask_{uploaded.name}_{idx}", width=200):
-                    # Build rich context for this specific image
-                    image_context = f"""
-                SPECIFIC IMAGE ANALYSIS:
-                - Image: {uploaded.name}
-                - Classification: {rec['class_prediction']} efficiency
-                - PCE: {rec['pce']}
-                - Batch context: {len(st.session_state.results)} total images analyzed
-                """
-                    
-                    # For single image questions, also include batch context
-                    batch_context = build_llm_context(st.session_state.results)
-                    full_context = f"{batch_context}\n\n{image_context}"
-                    
-                    prompt_text = f"{full_context}\n\nQuestion: {q}"
-                    resp = generate_llm_response(sys_prompt, prompt_text, max_tokens, temp)
-                    st.session_state.chat_history.append({"role":"user","text":f"[{uploaded.name}] {q}"})
-                    st.session_state.chat_history.append({"role":"llm","text":resp})
-                    st.rerun()
-
-# ---------------- Batch LLM Summary ----------------
-if run_batch and st.session_state.results:
-    if st.session_state.classifier is None:
-        st.error("❌ Cannot generate summary: Classifier model not loaded")
-    else:
-        context_text = "\n".join([
-            f"{i+1}. {r['file']}: {r['class_prediction']}— PCE: {r['pce']}"
-            for i,r in enumerate(st.session_state.results)
-        ])
-        low_imgs = [r['file'] for r in st.session_state.results if r['class_prediction']=="Low"]
-        low_context = f"⚠️ Low efficiency detected in: {', '.join(low_imgs)}\n\n" if low_imgs else ""
-        final_prompt = low_context + st.session_state.user_prompt_default.strip() + "\n\nBatch results:\n" + context_text + "\n\n" 
-        llm_raw = generate_llm_response(sys_prompt, final_prompt, max_tokens, temp)
-        cleaned_response = llm_raw.replace(final_prompt,"").strip()
-        st.session_state.chat_history.append({"role":"user","text":"Batch summary request"})
-        st.session_state.chat_history.append({"role":"llm","text":cleaned_response})
-        st.rerun()
-
-    # show table - convert PCE to string for display
-    # ---------------- Display Batch Table ----------------
-    if st.session_state.results:
-        st.markdown("### Batch results")
-        display_data = []
-        for result in st.session_state.results:
-            display_data.append({
-                "file": result["file"],
-                "class_prediction": result["class_prediction"],
-                "pce": f"{result['pce']}%" if result["pce"] != "—" else "N/A"
-            })
-        st.dataframe(pd.DataFrame(display_data), width=900)
+                    if not st.session_state.api_key:
+                        st.error("❌ Please configure API key in sidebar first")
+                    else:
+                        # Build rich context for this specific image
+                        image_context = f"""
+                    SPECIFIC IMAGE ANALYSIS:
+                    - Image: {uploaded.name}
+                    - Classification: {rec['class_prediction']} efficiency
+                    - PCE: {rec['pce']}
+                    - Batch context: {len(st.session_state.results)} total images analyzed
+                    """
+                        
+                        # For single image questions, also include batch context
+                        batch_context = build_llm_context(st.session_state.results)
+                        full_context = f"{batch_context}\n\n{image_context}"
+                        
+                        prompt_text = f"{full_context}\n\nQuestion: {q}"
+                        resp = generate_llm_response(sys_prompt, prompt_text, max_tokens, temp)
+                        st.session_state.chat_history.append({"role":"user","text":f"[{uploaded.name}] {q}"})
+                        st.session_state.chat_history.append({"role":"llm","text":resp})
+                        st.rerun()
 
 # ------------------------- BATCH LLM SUMMARY -------------------------
 if run_batch and st.session_state.results:
     if st.session_state.classifier is None:
         st.error("❌ Cannot generate summary: Classifier model not loaded")
+    elif not st.session_state.api_key:
+        st.error("❌ Cannot generate summary: API key not configured")
     else:
         # Build comprehensive context from ALL analysis results
         rich_context = build_llm_context(st.session_state.results)
         
-        final_prompt = f"{rich_context}\n\nQuestion: {st.session_state.user_prompt_default}"
+        final_prompt = f"{rich_context}\n\nQuestion: { st.session_state.user_prompt_default}"
         
         llm_raw = generate_llm_response(sys_prompt, final_prompt, max_tokens, temp)
         # Don't clean the response as aggressively for batch summaries
@@ -996,17 +708,20 @@ with chat_col_left:
     
         # ✅ CUSTOM QUESTION HANDLER - ADDED HERE
         if ask_custom and user_question.strip():
-            if st.session_state.results:
-                # Use context-aware prompt building
-                context_prompt = build_context_aware_prompt(st.session_state.results, user_question)
-                full_prompt = context_prompt
+            if not st.session_state.api_key:
+                st.error("❌ Please configure API key in sidebar first")
             else:
-                full_prompt = user_question
-            
-            resp = generate_llm_response(sys_prompt, full_prompt, max_tokens, temp)
-            st.session_state.chat_history.append({"role":"user","text":user_question})
-            st.session_state.chat_history.append({"role":"llm","text":resp})
-            st.rerun()
+                if st.session_state.results:
+                    # Use context-aware prompt building
+                    context_prompt = build_context_aware_prompt(st.session_state.results, user_question)
+                    full_prompt = context_prompt
+                else:
+                    full_prompt = user_question
+                
+                resp = generate_llm_response(sys_prompt, full_prompt, max_tokens, temp)
+                st.session_state.chat_history.append({"role":"user","text":user_question})
+                st.session_state.chat_history.append({"role":"llm","text":resp})
+                st.rerun()
     
         if clear_input:
             st.rerun()
@@ -1016,60 +731,72 @@ with chat_col_left:
     col_f1, col_f2 = st.columns(2)
     with col_f1:
         if st.button("Defect Analysis", key="defect_analysis_btn", width=220):
-            if st.session_state.results:
-                context_prompt = build_context_aware_prompt(
-                    st.session_state.results, 
-                    "Analyze the defect patterns in low efficiency solar cells and suggest root causes."
-                )
-                resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+            if not st.session_state.api_key:
+                st.error("❌ Please configure API key in sidebar first")
             else:
-                resp = generate_llm_response(sys_prompt, "Analyze solar cell defect patterns.", max_tokens, temp)
-            st.session_state.chat_history.append({"role":"user","text":"Defect analysis"})
-            st.session_state.chat_history.append({"role":"llm","text":resp})
-            st.rerun()
+                if st.session_state.results:
+                    context_prompt = build_context_aware_prompt(
+                        st.session_state.results, 
+                        "Analyze the defect patterns in low efficiency solar cells and suggest root causes."
+                    )
+                    resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+                else:
+                    resp = generate_llm_response(sys_prompt, "Analyze solar cell defect patterns.", max_tokens, temp)
+                st.session_state.chat_history.append({"role":"user","text":"Defect analysis"})
+                st.session_state.chat_history.append({"role":"llm","text":resp})
+                st.rerun()
     
     with col_f2:
         if st.button("PCE Analysis", key="pce_analysis_btn", width=220):
-            if st.session_state.results:
-                context_prompt = build_context_aware_prompt(
-                    st.session_state.results,
-                    "Analyze the PCE distribution and performance quality of high efficiency solar cells."
-                )
-                resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+            if not st.session_state.api_key:
+                st.error("❌ Please configure API key in sidebar first")
             else:
-                resp = generate_llm_response(sys_prompt, "Analyze PCE values.", max_tokens, temp)
-            st.session_state.chat_history.append({"role":"user","text":"PCE analysis"})
-            st.session_state.chat_history.append({"role":"llm","text":resp})
-            st.rerun()
+                if st.session_state.results:
+                    context_prompt = build_context_aware_prompt(
+                        st.session_state.results,
+                        "Analyze the PCE distribution and performance quality of high efficiency solar cells."
+                    )
+                    resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+                else:
+                    resp = generate_llm_response(sys_prompt, "Analyze PCE values.", max_tokens, temp)
+                st.session_state.chat_history.append({"role":"user","text":"PCE analysis"})
+                st.session_state.chat_history.append({"role":"llm","text":resp})
+                st.rerun()
     
     col_f3, col_f4 = st.columns(2)
     with col_f3:
         if st.button("Batch Summary", key="batch_summary_btn", width=220):
-            if st.session_state.results:
-                context_prompt = build_context_aware_prompt(
-                    st.session_state.results,
-                    "Provide a comprehensive summary of the EL image analysis batch results with quality assessment."
-                )
-                resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+            if not st.session_state.api_key:
+                st.error("❌ Please configure API key in sidebar first")
             else:
-                resp = generate_llm_response(sys_prompt, "Summarize the analysis results.", max_tokens, temp)
-            st.session_state.chat_history.append({"role":"user","text":"Batch summary"})
-            st.session_state.chat_history.append({"role":"llm","text":resp})
-            st.rerun()
+                if st.session_state.results:
+                    context_prompt = build_context_aware_prompt(
+                        st.session_state.results,
+                        "Provide a comprehensive summary of the EL image analysis batch results with quality assessment."
+                    )
+                    resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+                else:
+                    resp = generate_llm_response(sys_prompt, "Summarize the analysis results.", max_tokens, temp)
+                st.session_state.chat_history.append({"role":"user","text":"Batch summary"})
+                st.session_state.chat_history.append({"role":"llm","text":resp})
+                st.rerun()
     
     with col_f4:
         if st.button("Next Steps", key="next_steps_btn", width=220):
-            if st.session_state.results:
-                context_prompt = build_context_aware_prompt(
-                    st.session_state.results,
-                    "Recommend practical next steps for investigation based on the EL analysis results."
-                )
-                resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+            if not st.session_state.api_key:
+                st.error("❌ Please configure API key in sidebar first")
             else:
-                resp = generate_llm_response(sys_prompt, "Suggest next steps.", max_tokens, temp)
-            st.session_state.chat_history.append({"role":"user","text":"Next steps"})
-            st.session_state.chat_history.append({"role":"llm","text":resp})
-            st.rerun()
+                if st.session_state.results:
+                    context_prompt = build_context_aware_prompt(
+                        st.session_state.results,
+                        "Recommend practical next steps for investigation based on the EL analysis results."
+                    )
+                    resp = generate_llm_response(sys_prompt, context_prompt, max_tokens, temp)
+                else:
+                    resp = generate_llm_response(sys_prompt, "Suggest next steps.", max_tokens, temp)
+                st.session_state.chat_history.append({"role":"user","text":"Next steps"})
+                st.session_state.chat_history.append({"role":"llm","text":resp})
+                st.rerun()
     with chat_col_right:
         st.markdown("### Controls")
         if st.button("Clear chat", key="clear_chat_history", width=160):
@@ -1089,4 +816,16 @@ with chat_col_left:
             st.download_button("⬇️ Download CSV", df_export.to_csv(index=False).encode(), 
                              file_name="el_results.csv", mime="text/csv", width=260,
                              key="controls_csv_download")
-        st.caption("Select and load a model in the sidebar to enable LLM features.")
+        st.caption("Configure your API key in the sidebar to enable LLM features.")
+
+# ------------------------- BATCH RESULTS TABLE -------------------------
+if st.session_state.results:
+    st.markdown("### Batch Results")
+    display_data = []
+    for result in st.session_state.results:
+        display_data.append({
+            "file": result["file"],
+            "class_prediction": result["class_prediction"],
+            "pce": f"{result['pce']}%" if result["pce"] != "—" else "N/A"
+        })
+    st.dataframe(pd.DataFrame(display_data), width=900)
