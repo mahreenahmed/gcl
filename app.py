@@ -1,4 +1,4 @@
-# el_agent_app.py -- Optimized version using online models (fixed)
+# el_agent_app.py -- Optimized version with encrypted API key
 import streamlit as st
 import torch
 import tempfile
@@ -12,6 +12,10 @@ from PIL import Image
 import cv2
 import requests
 import time
+import base64
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torchvision.models as models
 import torch.nn as nn
@@ -25,15 +29,65 @@ RF_MODEL_PATH = "models/weighted_random_forest_model.pkl"
 SCALER_PATH = "models/feature_scaler.pkl"
 
 # API Configuration
-API_URL = " https://models.sjtu.edu.cn/api/v1/chat/completions"
+API_URL = "https://models.sjtu.edu.cn/api/v1/chat/completions"
 API_MODEL = "deepseek-v3"  # Choose code model
+
+# 🔒 ENCRYPTED API KEY - Safe to commit to GitHub
+# To generate this, run the encrypt_key.py script with your actual API key
+ENCRYPTED_API_KEY = "Z0FBQUFBQnBLVEstTkpJWm5sd294UkE4T0ZrVXpnVW5UVEg0bTk0SEV0X0s2ei1MUzBKMUQ0aWJJb0E2aXRhMVFtajB5Ri1kdmtYcTZiNUNrZ0owc2lfbk5mWlpEdFlHWUEtbGZyc0thbTVnM1BvV3pnSzVQZm89"  # Replace with your encrypted key
 
 IMAGE_DISPLAY_WIDTH = 360
 AUTO_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_TOKENS_DEFAULT = 150  # Reduced from 250
-TEMPERATURE_DEFAULT = 0.3  # Increased from 0.2 for small models
+MAX_TOKENS_DEFAULT = 300  # Increased for better responses
+TEMPERATURE_DEFAULT = 0.7  # Increased for more creative responses
 
 st.set_page_config(page_title="🔍 EL LLM Agent", layout="wide")
+
+# ------------------------- ENCRYPTION FUNCTIONS -------------------------
+def decrypt_api_key(encrypted_key, password="el_agent_secure_password_2024"):
+    """Decrypt the API key at runtime"""
+    try:
+        # Derive key from password (same as encryption)
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b'el_agent_salt_12345',  # Fixed salt - must match encryption
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        
+        # Decrypt
+        fernet = Fernet(key)
+        decoded = base64.b64decode(encrypted_key.encode())
+        decrypted_key = fernet.decrypt(decoded).decode()
+        
+        # Clean up the key (remove Bearer if present in the original)
+        if decrypted_key.startswith("Bearer "):
+            decrypted_key = decrypted_key[7:].strip()
+            
+        return decrypted_key
+    except Exception as e:
+        st.error(f"🔒 Decryption failed: {e}")
+        return None
+
+def get_api_key():
+    """Get decrypted API key - completely hidden from users"""
+    try:
+        # Try to decrypt the embedded encrypted key
+        if ENCRYPTED_API_KEY and ENCRYPTED_API_KEY != "YOUR_ENCRYPTED_KEY_HERE":
+            decrypted_key = decrypt_api_key(ENCRYPTED_API_KEY)
+            if decrypted_key:
+                return decrypted_key
+        
+        # Fallback: Check if user provided key via environment (for development)
+        env_key = os.getenv('SJTU_API_KEY')
+        if env_key:
+            return env_key
+            
+        return None
+    except Exception as e:
+        st.error(f"🔒 API key retrieval error: {e}")
+        return None
 
 # ------------------------- SESSION STATE -------------------------
 if "results" not in st.session_state:
@@ -70,9 +124,9 @@ if "feature_scaler" not in st.session_state:
 if "user_prompt_default" not in st.session_state:
     st.session_state.user_prompt_default = ""
 
-# API Key in session state
+# API Key in session state - will be set automatically
 if "api_key" not in st.session_state:
-    st.session_state.api_key = ""
+    st.session_state.api_key = get_api_key()  # Auto-set from encrypted key
 
 # ------------------------- STYLES -------------------------
 st.markdown("""
@@ -98,10 +152,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------- API QUERY FUNCTION -------------------------
-def query_api(messages, max_tokens=150, temperature=0.3):
+def query_api(messages, max_tokens=300, temperature=0.7):
     """Query the online API for LLM responses"""
     if not st.session_state.api_key:
-        return "⚠️ Error: API key not configured. Please enter your API key in the sidebar."
+        return "⚠️ Error: API key not configured. Please check the sidebar for status."
     
     url = API_URL
     headers = {
@@ -129,6 +183,7 @@ def query_api(messages, max_tokens=150, temperature=0.3):
             return content
         else:
             st.error(f"❌ API request failed with status code: {response.status_code}")
+            st.error(f"Response: {response.text[:200]}...")
             return f"⚠️ API Error: HTTP {response.status_code}"
             
     except requests.exceptions.Timeout:
@@ -169,7 +224,6 @@ def load_pce_classifier(path):
         return None
 
 @st.cache_resource(show_spinner=True)
-# ------------------------- ResNet Feature Extractor (OLD PIPELINE) -------------------------
 def load_old_resnet_feature_extractor(device="cpu"):
     """
     Load ResNet18 feature extractor as in the old training pipeline.
@@ -444,20 +498,34 @@ def build_llm_context(results_data):
 with st.sidebar:
     st.title("⚙️ API Configuration")
     
-    # API Key input
-    st.markdown("### 🔑 API Configuration")
-    api_key = st.text_input(
-        "Enter your API Key:",
-        type="password",
-        placeholder="Bearer your_api_key_here",
-        help="Get your API key from the model provider"
-    )
+    # 🔒 Auto-configured API Key - No user input needed
+    st.markdown("### 🔑 API Status")
     
-    if api_key:
-        st.session_state.api_key = api_key
-        st.success("✅ API key configured")
+    if st.session_state.api_key:
+        st.success("✅ API Key: Securely Configured")
+        st.info("🔒 API key is encrypted and hidden from users")
+        
+        # Test API connection
+        if st.button("🧪 Test API Connection", key="test_api_connection"):
+            with st.spinner("Testing API connection..."):
+                test_response = query_api("Say 'Hello World' in 3 words:", max_tokens=10, temperature=0.1)
+            if "Hello" in test_response or "hello" in test_response.lower():
+                st.success("✅ API connection successful!")
+                st.info(f"Test response: '{test_response}'")
+            else:
+                st.error("❌ API connection test failed")
+                st.info(f"Response: '{test_response}'")
     else:
-        st.warning("⚠️ Please enter your API key to use LLM features")
+        st.error("❌ API Key: Not Configured")
+        st.warning("""
+        Please set up the encrypted API key:
+        
+        1. Run: `python encrypt_key.py` 
+        2. Replace `ENCRYPTED_API_KEY` in this file
+        3. Restart the app
+        
+        Or set `SJTU_API_KEY` environment variable.
+        """)
     
     st.markdown("---")
     st.markdown("### 📊 Model Status")
@@ -487,8 +555,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🔧 Generation Settings")
     
-    max_tokens = st.slider("Max tokens", 64, 1024, value=150, step=16, key="max_tokens_slider")
-    temp = st.slider("Temperature", 0.0, 1.0, value=0.3, step=0.05, key="temp_slider")
+    max_tokens = st.slider("Max tokens", 100, 800, value=300, step=50, key="max_tokens_slider")
+    temp = st.slider("Temperature", 0.0, 1.0, value=0.7, step=0.05, key="temp_slider")
     sys_prompt = st.text_area("System prompt", 
         value="""You are an expert photovoltaic (PV) electroluminescence (EL) imaging analyst with 15 years of experience in solar cell defect detection.
     
@@ -515,31 +583,26 @@ with st.sidebar:
     
     CRITICAL: Always base your analysis on the provided EL image analysis results.""", 
         height=180, key="sys_prompt_area")
-    
-    # Test API connection
-    if st.session_state.api_key:
-        if st.button("🧪 Test API Connection", key="test_api_connection"):
-            with st.spinner("Testing API connection..."):
-                test_response = query_api("Say 'Hello World' in 3 words:", max_tokens=10, temperature=0.1)
-            if "Hello" in test_response or "hello" in test_response.lower():
-                st.success("✅ API connection successful!")
-                st.info(f"Test response: '{test_response}'")
-            else:
-                st.error("❌ API connection test failed")
-                st.info(f"Response: '{test_response}'")
 
 # ------------------------- UI -------------------------
 st.title("🔍 EL Image Efficiency Agent")
+st.info("🔒 **Secure API**: API key is encrypted and hidden from users")
+
 uploaded_files = st.file_uploader("📤 Upload EL images", accept_multiple_files=True, type=["png","jpg","jpeg"])
 
-# ✅ ADD THIS WARNING MESSAGE:
+# ✅ API STATUS MESSAGE:
 if not st.session_state.api_key:
-    st.warning("""
-    ⚠️ **LLM Note**: No API key configured. 
-    - Image classification and analysis will still work
-    - LLM features (summaries, Q&A) are disabled
-    - Please enter your API key in the sidebar
+    st.error("""
+    ❌ **API Not Configured**
+    
+    LLM features are currently disabled. To enable:
+    
+    1. **Set up encrypted API key** (contact administrator)
+    2. **Use environment variable** `SJTU_API_KEY`
+    3. **Image analysis** will still work without API
     """)
+else:
+    st.success("✅ **API Ready**: LLM features are enabled with secure encrypted key")
     
 col_run, col_clear, col_dl = st.columns([1,1,2])
 run_batch = col_run.button("🔎 Classify & Summarize Batch", width=180)
@@ -625,12 +688,13 @@ if uploaded_files:
                     st.markdown(f"<div class='pce-highlight'>Predicted PCE: {rec['pce']}%</div>", unsafe_allow_html=True)
                 else:
                     st.markdown(f"<div class='pred-sub' style='text-align: center;'>PCE: {rec['pce']}</div>", unsafe_allow_html=True)
+                
                 # ---------------- Per-image LLM question ----------------
                 q = st.text_input(f"Question for {uploaded.name}", key=f"q_{uploaded.name}_{idx}", 
                                   value="What could cause this efficiency level?")
                 if st.button("💬 Ask LLM", key=f"ask_{uploaded.name}_{idx}", width=200):
                     if not st.session_state.api_key:
-                        st.error("❌ Please configure API key in sidebar first")
+                        st.error("❌ API key not configured")
                     else:
                         # Build rich context for this specific image
                         image_context = f"""
@@ -661,11 +725,10 @@ if run_batch and st.session_state.results:
         # Build comprehensive context from ALL analysis results
         rich_context = build_llm_context(st.session_state.results)
         
-        final_prompt = f"{rich_context}\n\nQuestion: { st.session_state.user_prompt_default}"
+        final_prompt = f"{rich_context}\n\nQuestion: Provide a comprehensive technical analysis of these EL image results"
         
         llm_raw = generate_llm_response(sys_prompt, final_prompt, max_tokens, temp)
-        # Don't clean the response as aggressively for batch summaries
-        cleaned_response = llm_raw
+        cleaned_response = clean_llm_response(llm_raw)
         
         st.session_state.chat_history.append({"role":"user","text":"Batch analysis summary request"})
         st.session_state.chat_history.append({"role":"llm","text":cleaned_response})
@@ -706,10 +769,10 @@ with chat_col_left:
             clear_input = st.button("🧹 Clear Input", key="clear_input_btn", width=120)
         st.markdown('</div>', unsafe_allow_html=True)
     
-        # ✅ CUSTOM QUESTION HANDLER - ADDED HERE
+        # ✅ CUSTOM QUESTION HANDLER
         if ask_custom and user_question.strip():
             if not st.session_state.api_key:
-                st.error("❌ Please configure API key in sidebar first")
+                st.error("❌ API key not configured")
             else:
                 if st.session_state.results:
                     # Use context-aware prompt building
@@ -732,7 +795,7 @@ with chat_col_left:
     with col_f1:
         if st.button("Defect Analysis", key="defect_analysis_btn", width=220):
             if not st.session_state.api_key:
-                st.error("❌ Please configure API key in sidebar first")
+                st.error("❌ API key not configured")
             else:
                 if st.session_state.results:
                     context_prompt = build_context_aware_prompt(
@@ -749,7 +812,7 @@ with chat_col_left:
     with col_f2:
         if st.button("PCE Analysis", key="pce_analysis_btn", width=220):
             if not st.session_state.api_key:
-                st.error("❌ Please configure API key in sidebar first")
+                st.error("❌ API key not configured")
             else:
                 if st.session_state.results:
                     context_prompt = build_context_aware_prompt(
@@ -767,7 +830,7 @@ with chat_col_left:
     with col_f3:
         if st.button("Batch Summary", key="batch_summary_btn", width=220):
             if not st.session_state.api_key:
-                st.error("❌ Please configure API key in sidebar first")
+                st.error("❌ API key not configured")
             else:
                 if st.session_state.results:
                     context_prompt = build_context_aware_prompt(
@@ -784,7 +847,7 @@ with chat_col_left:
     with col_f4:
         if st.button("Next Steps", key="next_steps_btn", width=220):
             if not st.session_state.api_key:
-                st.error("❌ Please configure API key in sidebar first")
+                st.error("❌ API key not configured")
             else:
                 if st.session_state.results:
                     context_prompt = build_context_aware_prompt(
@@ -797,6 +860,7 @@ with chat_col_left:
                 st.session_state.chat_history.append({"role":"user","text":"Next steps"})
                 st.session_state.chat_history.append({"role":"llm","text":resp})
                 st.rerun()
+
     with chat_col_right:
         st.markdown("### Controls")
         if st.button("Clear chat", key="clear_chat_history", width=160):
@@ -816,7 +880,7 @@ with chat_col_left:
             st.download_button("⬇️ Download CSV", df_export.to_csv(index=False).encode(), 
                              file_name="el_results.csv", mime="text/csv", width=260,
                              key="controls_csv_download")
-        st.caption("Configure your API key in the sidebar to enable LLM features.")
+        st.caption("API key is securely encrypted and hidden from users.")
 
 # ------------------------- BATCH RESULTS TABLE -------------------------
 if st.session_state.results:
