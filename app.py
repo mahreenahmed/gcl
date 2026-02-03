@@ -34,7 +34,7 @@ API_MODEL = "deepseek-v3"  # Choose code model
 
 # 🔒 ENCRYPTED API KEY - Safe to commit to GitHub
 # To generate this, run the encrypt_key.py script with your actual API key
-ENCRYPTED_API_KEY = "Z0FBQUFBQnBLVEstTkpJWm5sd294UkE4T0ZrVXpnVW5UVEg0bTk0SEV0X0s2ei1MUzBKMUQ0aWJJb0E2aXRhMVFtajB5Ri1kdmtYcTZiNUNrZ0owc2lfbk5mWlpEdFlHWUEtbGZyc0thbTVnM1BvV3pnSzVQZm89"  # Replace with your encrypted key
+ENCRYPTED_API_KEY = "Z0FBQUFBQnBnQkQxS01pOHlRZ2N0Q1BsdTRzM2NWTURJZTdPa2dtT1FMQTVkb2NyOF80RGhyNk85QVFsbjRaaURFUkU1MTV2eDlxNk5wNnQxSklvQVUycm9fVmRmWjNvMFg1QWNjTmt3bUIxT3hIZnhpbHZDb2s9"  # Replace with your encrypted key
 
 IMAGE_DISPLAY_WIDTH = 360
 AUTO_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -44,7 +44,7 @@ TEMPERATURE_DEFAULT = 0.7  # Increased for more creative responses
 st.set_page_config(page_title="🔍 EL LLM Agent", layout="wide")
 
 # ------------------------- ENCRYPTION FUNCTIONS -------------------------
-def decrypt_api_key(encrypted_key, password="el_agent_secure_password_2024"):
+def decrypt_api_key(encrypted_key, password="el_agent_secure_password_2026"):
     """Decrypt the API key at runtime"""
     try:
         # Derive key from password (same as encryption)
